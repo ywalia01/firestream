@@ -1,0 +1,589 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "CloudFormation template for Fyrestream - A Video Transcoding Pipeline on AWS"
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: fyrestream
+    Description: The name of the project
+
+Resources:
+  # VPC and Network Configuration
+  FyrestreamVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-vpc
+
+  FyrestreamDefaultSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Default Security Group for the VPC
+      VpcId: !Ref FyrestreamVPC
+      # SecurityGroupIngress:
+      #   - IpProtocol: "-1"
+      #     SourceSecurityGroupId: !Ref FyrestreamDefaultSecurityGroup
+      #     Description: Allow all traffic from this security group
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-default-sg
+
+  FyrestreamDefaultSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow all traffic from this security group
+      GroupId: !GetAtt FyrestreamDefaultSecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      SourceSecurityGroupId: !GetAtt FyrestreamDefaultSecurityGroup.GroupId
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref FyrestreamVPC
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-public-subnet-1
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref FyrestreamVPC
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: 10.0.2.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-public-subnet-2
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref FyrestreamVPC
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: 10.0.3.0/24
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-private-subnet-1
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref FyrestreamVPC
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: 10.0.4.0/24
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-private-subnet-2
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-igw
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref FyrestreamVPC
+
+  NatGatewayEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref FyrestreamVPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-public-routes
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref FyrestreamVPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-private-routes
+
+  DefaultPrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet1
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet2
+
+  # S3 Bucket
+  FyrestreamVideoBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${ProjectName}-videos
+      # NotificationConfiguration:
+      #   QueueConfigurations:
+      #     - Event: s3:ObjectCreated:*
+      #       Queue: !GetAtt FyrestreamSQSQueue.Arn
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: s3:ObjectCreated:*
+            Queue: !GetAtt FyrestreamSQSQueue.Arn
+    DependsOn: FyrestreamSQSQueuePolicy
+
+  # FyrestreamVideoBucketPolicy:
+  #   Type: AWS::S3::BucketPolicy
+  #   Properties:
+  #     Bucket: !Ref FyrestreamVideoBucket
+  #     PolicyDocument:
+  #       Version: "2012-10-17"
+  #       Statement:
+  #         - Sid: AllowS3ToSendMessageToSQS
+  #           Effect: Allow
+  #           Principal:
+  #             Service: s3.amazonaws.com
+  #           Action:
+  #             - s3:PutObject
+  #           Resource: !Sub "${FyrestreamVideoBucket.Arn}/*"
+  #         - Sid: AllowS3BucketNotifications
+  #           Effect: Allow
+  #           Principal:
+  #             Service: s3.amazonaws.com
+  #           Action:
+  #             - sqs:SendMessage
+  #           Resource: !GetAtt FyrestreamSQSQueue.Arn
+  #           Condition:
+  #             ArnLike:
+  #               aws:SourceArn: !GetAtt FyrestreamVideoBucket.Arn
+
+  # S3 Prod Bucket
+  FyrestreamProdBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${ProjectName}-prod
+
+  # SQS Queue
+  FyrestreamSQSQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${ProjectName}-sqs
+      VisibilityTimeout: 60
+
+  FyrestreamSQSQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref FyrestreamSQSQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action: SQS:SendMessage
+            Resource: !GetAtt FyrestreamSQSQueue.Arn
+            Condition:
+              ArnLike:
+                aws:SourceArn: !Sub arn:aws:s3:::${ProjectName}-videos
+
+  # Secrets Manager
+  FyrestreamSecret:
+    Type: "AWS::SecretsManager::Secret"
+    Properties:
+      Name: !Sub "/${ProjectName}/config"
+      Description: "Configuration for Fyrestream project"
+      SecretString: !Sub
+        - '{"QUEUE_URL": "${QueueUrl}", "CLUSTER_ARN": "${ClusterArn}", "TASK_DEFINITION_ARN": "${TaskDefArn}", "SUBNETS": "${Subnet1},${Subnet2}", "SECURITY_GROUP": "${SecurityGroup}"}'
+        - QueueUrl: !Ref FyrestreamSQSQueue
+          ClusterArn: !GetAtt ECSCluster.Arn
+          TaskDefArn: !Ref ECSTaskDefinition
+          Subnet1: !Ref PrivateSubnet1
+          Subnet2: !Ref PrivateSubnet2
+          SecurityGroup: !GetAtt FyrestreamDefaultSecurityGroup.GroupId
+
+  # SQS Poller Lambda Function
+  SQSPollerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${ProjectName}-sqs-poller
+      Handler: index.lambda_handler
+      Role: arn:aws:iam::492025348070:role/LabRole
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import logging
+          import os
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          lambda_client = boto3.client('lambda')
+          sqs_client = boto3.client('sqs')
+          secrets_client = boto3.client('secretsmanager')
+
+          SECRET_NAME = os.environ['SECRET_NAME']
+
+          def get_secret():
+              try:
+                  get_secret_value_response = secrets_client.get_secret_value(SecretId=SECRET_NAME)
+                  return json.loads(get_secret_value_response['SecretString'])
+              except Exception as e:
+                  logger.error(f"Error retrieving secret: {str(e)}")
+                  raise e
+
+          config = get_secret()
+          QUEUE_URL = config['QUEUE_URL']
+
+          def lambda_handler(event, context):
+              logger.info('Received event: %s', json.dumps(event, indent=2))
+
+              for record in event['Records']:
+                  logger.info('Processing record: %s', json.dumps(record, indent=2))
+
+                  try:
+                      body = json.loads(record['body'])
+                  except json.JSONDecodeError as error:
+                      logger.error('Error parsing record body: %s', error)
+                      continue
+
+                  if 'Records' in body and body['Records'][0]['eventSource'] == 'aws:s3':
+                      s3_event = body['Records'][0]
+                      logger.info('S3 event: %s', json.dumps(s3_event, indent=2))
+
+                      if s3_event['eventName'] == 's3:TestEvent':
+                          delete_params = {
+                              'QueueUrl': QUEUE_URL,
+                              'ReceiptHandle': record['receiptHandle']
+                          }
+                          try:
+                              sqs_client.delete_message(**delete_params)
+                              logger.info('Test event deleted from SQS queue')
+                          except Exception as error:
+                              logger.error('Error deleting test event from SQS queue: %s', error)
+                          continue
+
+                      payload = {
+                          'eventVersion': s3_event.get('eventVersion'),
+                          'eventSource': s3_event.get('eventSource'),
+                          'awsRegion': s3_event.get('awsRegion'),
+                          'eventTime': s3_event.get('eventTime'),
+                          'eventName': s3_event.get('eventName'),
+                          'userIdentity': s3_event.get('userIdentity'),
+                          'requestParameters': s3_event.get('requestParameters'),
+                          'responseElements': s3_event.get('responseElements'),
+                          's3': {
+                              's3SchemaVersion': s3_event.get('s3', {}).get('s3SchemaVersion'),
+                              'configurationId': s3_event.get('s3', {}).get('configurationId'),
+                              'bucket': s3_event.get('s3', {}).get('bucket'),
+                              'object': s3_event.get('s3', {}).get('object')
+                          }
+                      }
+                      
+                      logger.info('Prepared payload: %s', json.dumps(payload, indent=2))
+
+                      invoke_params = {
+                          'FunctionName': 'fyrestream-transcoder-invoker',
+                          'InvocationType': 'Event',
+                          'Payload': json.dumps(payload)
+                      }
+
+                      try:
+                          response = lambda_client.invoke(**invoke_params)
+                          logger.info('Successfully invoked Transcoder Invoker Function. StatusCode: %s, ExecutedVersion: %s',
+                                      response.get('StatusCode'), response.get('ExecutedVersion'))
+                      except Exception as error:
+                          logger.error('Error invoking Transcoder Invoker Function: %s', str(error))
+                  else:
+                      logger.warning('Record does not contain S3 event: %s', json.dumps(record, indent=2))
+
+              return f"Processed {len(event['Records'])} messages."
+      Runtime: python3.12
+      Timeout: 60
+      MemorySize: 128
+      Environment:
+        Variables:
+          SECRET_NAME: !Ref FyrestreamSecret
+      VpcConfig:
+        SecurityGroupIds:
+          - !GetAtt FyrestreamDefaultSecurityGroup.GroupId
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+
+  LambdaSQSTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: 10
+      EventSourceArn: !GetAtt FyrestreamSQSQueue.Arn
+      FunctionName: !GetAtt SQSPollerFunction.Arn
+      Enabled: true
+
+    # Transcoder Invoker Lambda Function
+  TranscoderInvokerFunc:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${ProjectName}-transcoder-invoker
+      Handler: index.lambda_handler
+      Role: arn:aws:iam::492025348070:role/LabRole
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import logging
+          from concurrent.futures import ThreadPoolExecutor
+          from datetime import datetime
+          import os
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          ecs_client = boto3.client('ecs')
+          secrets_client = boto3.client('secretsmanager')
+
+          SECRET_NAME = os.environ['SECRET_NAME']
+
+          def get_secret():
+              try:
+                  get_secret_value_response = secrets_client.get_secret_value(SecretId=SECRET_NAME)
+                  return json.loads(get_secret_value_response['SecretString'])
+              except Exception as e:
+                  logger.error(f"Error retrieving secret: {str(e)}")
+                  raise e
+
+          config = get_secret()
+          CLUSTER_ARN = config['CLUSTER_ARN']
+          TASK_DEFINITION_ARN = config['TASK_DEFINITION_ARN']
+          SUBNETS = config['SUBNETS'].split(',')
+          SECURITY_GROUPS = [config['SECURITY_GROUP']]
+
+          def json_serial(obj):
+              if isinstance(obj, datetime):
+                  return obj.isoformat()
+              raise TypeError(f"Type {type(obj)} not serializable")
+
+          def launch_ecs_task(ecs_params):
+              try:
+                  ecs_response = ecs_client.run_task(**ecs_params)
+                  logger.info('ECS task started: %s', json.dumps(ecs_response, indent=2, default=json_serial))
+              except Exception as error:
+                  logger.error('Error starting ECS task: %s', str(error))
+
+          def lambda_handler(event, context):
+              logger.info('Received event: %s', json.dumps(event, indent=2))
+              
+              s3_event = event.get('s3', {})
+              bucket_name = s3_event.get('bucket', {}).get('name')
+              object_key = s3_event.get('object', {}).get('key')
+              
+              if not bucket_name or not object_key:
+                  logger.error('Missing bucket name or object key in the event')
+                  return
+
+              ecs_params = {
+                  'cluster': CLUSTER_ARN,
+                  'taskDefinition': TASK_DEFINITION_ARN,
+                  'launchType': 'FARGATE',
+                  'networkConfiguration': {
+                      'awsvpcConfiguration': {
+                          'subnets': SUBNETS,
+                          'securityGroups': SECURITY_GROUPS,
+                          'assignPublicIp': 'ENABLED'
+                      }
+                  },
+                  'overrides': {
+                      'containerOverrides': [
+                          {
+                              'name': 'fyrestream-transcoder',
+                              'environment': [
+                                  {'name': 'BUCKET_NAME', 'value': bucket_name},
+                                  {'name': 'KEY', 'value': object_key}
+                              ]
+                          }
+                      ]
+                  }
+              }
+              
+              with ThreadPoolExecutor() as executor:
+                  executor.submit(launch_ecs_task, ecs_params)
+
+              logger.info(f"Initiated asynchronous ECS task launch for object {object_key} in bucket {bucket_name}")
+              return f"Processed event for object {object_key} in bucket {bucket_name}"
+      Runtime: python3.12
+      Timeout: 60
+      MemorySize: 128
+      Environment:
+        Variables:
+          SECRET_NAME: !Ref FyrestreamSecret
+      VpcConfig:
+        SecurityGroupIds:
+          - !GetAtt FyrestreamDefaultSecurityGroup.GroupId
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+
+  # ECS Cluster
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub ${ProjectName}-cluster
+
+  ECSTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${ProjectName}-transcoder
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: "256"
+      Memory: "512"
+      ExecutionRoleArn: arn:aws:iam::492025348070:role/LabRole
+      TaskRoleArn: arn:aws:iam::492025348070:role/LabRole
+      ContainerDefinitions:
+        - Name: fyrestream-transcoder
+          Image: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ProjectName}-transcoder:latest
+          Essential: true
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ECSLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+
+  ECSLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /ecs/${ProjectName}-transcoder
+      RetentionInDays: 7
+
+  # ECR Repository
+  ECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub ${ProjectName}-transcoder
+      ImageScanningConfiguration:
+        ScanOnPush: false
+
+Outputs:
+  VPCId:
+    Description: The ID of the VPC
+    Value: !Ref FyrestreamVPC
+    Export:
+      Name: !Sub ${AWS::StackName}-VPCId
+
+  PublicSubnet1:
+    Description: The ID of the first public subnet
+    Value: !Ref PublicSubnet1
+    Export:
+      Name: !Sub ${AWS::StackName}-PublicSubnet1
+
+  PublicSubnet2:
+    Description: The ID of the second public subnet
+    Value: !Ref PublicSubnet2
+    Export:
+      Name: !Sub ${AWS::StackName}-PublicSubnet2
+
+  PrivateSubnet1:
+    Description: The ID of the first private subnet
+    Value: !Ref PrivateSubnet1
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateSubnet1
+
+  PrivateSubnet2:
+    Description: The ID of the second private subnet
+    Value: !Ref PrivateSubnet2
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateSubnet2
+
+  S3BucketName:
+    Description: The name of the S3 bucket
+    Value: !Ref FyrestreamVideoBucket
+    Export:
+      Name: !Sub ${AWS::StackName}-S3BucketName
+
+  SQSQueueURL:
+    Description: The URL of the SQS queue
+    Value: !Ref FyrestreamSQSQueue
+    Export:
+      Name: !Sub ${AWS::StackName}-SQSQueueURL
+
+  SQSPollerFunctionArn:
+    Description: The ARN of the SQS Poller Lambda function
+    Value: !GetAtt SQSPollerFunction.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-SQSPollerFunctionArn
+
+  TranscoderInvokerFuncArn:
+    Description: The ARN of the Transcoder Invoker Lambda function
+    Value: !GetAtt TranscoderInvokerFunc.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-TranscoderInvokerFuncArn
+
+  ECSClusterArn:
+    Description: The ARN of the ECS cluster
+    Value: !GetAtt ECSCluster.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-ECSClusterArn
+
+  ECSTaskDefinitionArn:
+    Description: The ARN of the ECS task definition
+    Value: !Ref ECSTaskDefinition
+    Export:
+      Name: !Sub ${AWS::StackName}-ECSTaskDefinitionArn
+
+  ECRRepositoryUri:
+    Description: The URI of the ECR repository
+    Value: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ProjectName}-transcoder
+    Export:
+      Name: !Sub ${AWS::StackName}-ECRRepositoryUri
