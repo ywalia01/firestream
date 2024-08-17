@@ -140,9 +140,4 @@ To upload a video:
 
 ## Contact
 
-For more information, feel free to contact me:
-
-- Name: [Your Name]
-- Email: [your.email@example.com]
-- LinkedIn: [Your LinkedIn Profile]
-- GitHub: [Your GitHub Profile]
+For more information, feel free to contact me at yashbest005@gmail.com
